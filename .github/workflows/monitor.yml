@@ -1,99 +1,39 @@
-import os
-import json
-import feedparser
-import requests
+name: AI News Monitor
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-HISTORY_FILE = "sent_history.json"
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
-# 监控源配置：官方 RSS 博客 + X 核心人物/线人镜像流
-FEEDS = {
-    # === 官方博客源 ===
-    "OpenAI News": "https://openai.com/news/rss.xml",
-    "Google DeepMind": "https://deepmind.google/blog/rss.xml",
-    "Anthropic News (Mirror)": "https://rsshub.bestblogs.dev/anthropic/news",
-    "Hugging Face Blog": "https://huggingface.co/blog/feed.xml",
+jobs:
+  check-and-notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
-    # === X / Twitter 核心战场与前沿线人 ===
-    "X | Sam Altman (OpenAI)": "https://rsshub.app/twitter/user/sama",
-    "X | Elon Musk (xAI)": "https://rsshub.app/twitter/user/elonmusk",
-    "X | Alex Albert (Anthropic DevRel)": "https://rsshub.app/twitter/user/alexalbert__",
-    "X | Tibor Blaho (逆向线人)": "https://rsshub.app/twitter/user/btibor91",
-    "X | TestingCatalog (内测线人)": "https://rsshub.app/twitter/user/testingcatalog"
-}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-def save_history(history):
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(history), f, ensure_ascii=False, indent=2)
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
 
-def send_telegram_message(title, link, source):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    text = (
-        f"🚨 *AI Breaking News* | {source}\n\n"
-        f"📌 *{title}*\n\n"
-        f"🔗 [点击阅读全文]({link})"
-    )
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False
-    }
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Error sending message: {e}")
-        return False
+      - name: Run Fetch Script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python main.py
 
-def main():
-    if not BOT_TOKEN or not CHAT_ID:
-        raise ValueError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-
-    history = load_history()
-    new_sent_count = 0
-
-    for source_name, feed_url in FEEDS.items():
-        try:
-            # 设置 15 秒超时，避免某单一源卡住整体流程
-            feed = feedparser.parse(feed_url, request_headers={"User-Agent": "Mozilla/5.0"})
-            
-            # 抓取最近 5 条
-            for entry in feed.entries[:5]:
-                post_id = entry.get("id") or entry.get("link")
-                if post_id and post_id not in history:
-                    # 针对 X 推文没有标题的情况做适配：优先提取 title，若无则取正文前 80 字
-                    raw_title = entry.get("title") or entry.get("summary") or "新动态更新"
-                    # 清洗换行符，保证卡片整洁
-                    title = raw_title.replace("\n", " ").strip()
-                    if len(title) > 90:
-                        title = title[:87] + "..."
-
-                    link = entry.get("link", "").strip()
-                    
-                    if send_telegram_message(title, link, source_name):
-                        history.add(post_id)
-                        new_sent_count += 1
-                        print(f"Sent: [{source_name}] {title}")
-        except Exception as e:
-            # 单独捕捉每个源的异常，即使某个源暂时被限流，其他源照常运行
-            print(f"Warning: Failed to fetch {source_name}: {e}")
-
-    if new_sent_count > 0:
-        save_history(history)
-        print(f"Total new messages sent: {new_sent_count}")
-    else:
-        print("No new updates found.")
-
-if __name__ == "__main__":
-    main()
+      - name: Commit & Push History
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_history.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update sent history [skip ci]" && git push)
